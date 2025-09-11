@@ -1,0 +1,71 @@
+# Sensitive
+.env
+auth.json
+*.session
+
+# Output
+output/
+logs/
+
+# Debug Files
+debug_*.png
+debug_*.html
+login_failed.png
+*.log
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.python-version
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+.virtualenv/
+virtualenv/
+pyvenv.cfg
+
+# Python Package Management
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
