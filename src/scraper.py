@@ -30,21 +30,60 @@ SELECTORS = {
 }
 
 
+async def get_expected_comment_count(page):
+    """
+    从评论头部获取期望的评论总数
+    """
+    try:
+        # 使用用户提供的选择器
+        header_selectors = [
+            '#flyout-right-drawer-region > div.comments-sidebar-layout > div.comment-sidebar-header > div.comment-count',
+            '#flyout-right-drawer-region > div.comments-sidebar-layout > div.comment-sidebar-header > h2',
+            '.comment-count',
+            '.comments-count'
+        ]
+        
+        for selector in header_selectors:
+            try:
+                element = page.locator(selector).first
+                if await element.count() > 0:
+                    text = await element.text_content()
+                    # 尝试提取数字
+                    import re
+                    numbers = re.findall(r'\d+', text or '')
+                    if numbers:
+                        count = int(numbers[0])
+                        print(f"📊 从评论头部获取到期望评论数: {count}")
+                        return count
+            except:
+                continue
+        
+        print("⚠️ 无法从评论头部获取评论数量")
+        return None
+        
+    except Exception as e:
+        print(f"获取期望评论数时出错: {e}")
+        return None
+
+
 async def debug_page_structure(page):
     """
-    调试函数：分析页面结构，帮助找到正确的选择器
+    调试：分析页面结构，帮助确认选择器
     """
-    print("🔍 调试: 分析页面结构...")
-    
     try:
-        # 检查评论区是否存在
+        print("🔍 调试: 分析页面结构...")
+        
+        # 获取期望的评论数量
+        expected_count = await get_expected_comment_count(page)
+        
+        # 检查评论区容器
         comment_region = page.locator('#sidebar-comments-region')
         if await comment_region.count() > 0:
             print("✅ 找到评论区容器")
             
             # 检查 Previous Comments 按钮
-            prev_buttons = await page.locator('a:has-text("Previous Comments")').count()
-            print(f"📄 Previous Comments 按钮数量: {prev_buttons}")
+            previous_buttons = await page.locator(SELECTORS['PREVIOUS_COMMENTS_BUTTON']).count()
+            print(f"📄 Previous Comments 按钮数量: {previous_buttons}")
             
             # 检查 More 链接
             more_links_1 = await page.locator('a:has-text("more")').count()
@@ -56,11 +95,131 @@ async def debug_page_structure(page):
             comment_items = await comment_region.locator('li').count()
             print(f"📄 评论项数量: {comment_items}")
             
+            # 比较期望数量和实际数量
+            if expected_count:
+                print(f"📊 期望评论数: {expected_count}, 当前评论项数: {comment_items}")
+                if comment_items < expected_count:
+                    print(f"⚠️ 可能还有 {expected_count - comment_items} 个评论未加载")
+            
         else:
             print("❌ 未找到评论区容器")
             
     except Exception as e:
         print(f"调试过程出错: {e}")
+
+
+async def load_all_previous_comments(page, config):
+    """
+    递归加载所有层级的 Previous Comments
+    包括根级别和嵌套在回复中的 Previous Comments
+    """
+    total_loaded = 0
+    max_iterations = 10  # 防止无限循环
+    
+    for iteration in range(max_iterations):
+        # 查找所有可见的 Previous Comments 按钮（包括嵌套的）
+        all_previous_buttons = await page.locator('a:has-text("Previous Comments")').all()
+        
+        if not all_previous_buttons:
+            # 如果没找到，尝试其他可能的选择器
+            all_previous_buttons = await page.locator(SELECTORS['PREVIOUS_COMMENTS_BUTTON']).all()
+        
+        if not all_previous_buttons:
+            print(f"  第 {iteration + 1} 轮：没有找到更多 Previous Comments 按钮")
+            break
+        
+        # 过滤出可见的按钮
+        visible_buttons = []
+        for button in all_previous_buttons:
+            try:
+                if await button.is_visible():
+                    visible_buttons.append(button)
+            except:
+                continue
+        
+        if not visible_buttons:
+            print(f"  第 {iteration + 1} 轮：没有可见的 Previous Comments 按钮")
+            break
+        
+        print(f"  第 {iteration + 1} 轮：找到 {len(visible_buttons)} 个 Previous Comments 按钮")
+        
+        # 点击所有可见的按钮
+        buttons_clicked = 0
+        for i, button in enumerate(visible_buttons):
+            try:
+                print(f"    点击第 {i+1} 个 Previous Comments 按钮...")
+                await button.scroll_into_view_if_needed()
+                await page.wait_for_timeout(500)
+                await button.click()
+                buttons_clicked += 1
+                total_loaded += 1
+                
+                # 每次点击后等待内容加载
+                await page.wait_for_timeout(1500)
+                
+            except Exception as e:
+                print(f"    点击第 {i+1} 个按钮失败: {e}")
+                continue
+        
+        if buttons_clicked == 0:
+            print(f"  第 {iteration + 1} 轮：没有成功点击任何按钮，结束加载")
+            break
+        
+        print(f"  第 {iteration + 1} 轮：成功点击了 {buttons_clicked} 个按钮")
+        
+        # 等待页面稳定
+        await page.wait_for_load_state('networkidle', timeout=10000)
+        await page.wait_for_timeout(config.WAIT_TIME)
+    
+    return total_loaded
+
+
+async def expand_remaining_more_links(page, config, max_iterations=3):
+    """
+    展开剩余的More链接（用于Previous Comments加载后的额外处理）
+    """
+    expand_count = 0
+    
+    for iteration in range(max_iterations):
+        try:
+            # 查找More链接
+            more_links = []
+            
+            primary_links = await page.locator(SELECTORS['EXPAND_MORE_LINKS']).all()
+            more_links.extend(primary_links)
+            
+            if not more_links:
+                fallback_links = await page.locator(SELECTORS['EXPAND_LINKS_FALLBACK']).all()
+                more_links.extend(fallback_links)
+            
+            if not more_links:
+                break
+                
+            print(f"    找到 {len(more_links)} 个More链接")
+            
+            links_clicked = 0
+            for i, link in enumerate(more_links):
+                try:
+                    if await link.is_visible():
+                        await link.scroll_into_view_if_needed()
+                        await page.wait_for_timeout(500)
+                        await link.click(force=True)
+                        links_clicked += 1
+                        expand_count += 1
+                        await page.wait_for_timeout(1000)
+                except Exception as e:
+                    continue
+            
+            if links_clicked == 0:
+                break
+                
+            await page.wait_for_timeout(config.WAIT_TIME)
+            
+        except Exception as e:
+            print(f"    展开剩余More链接时出错: {e}")
+            break
+    
+    return expand_count
 
 
 async def load_all_comments(page, config):
@@ -74,46 +233,11 @@ async def load_all_comments(page, config):
     # 先进行调试分析
     await debug_page_structure(page)
     
-    # Phase 1: 加载 Previous Comments（往前加载更早的评论）
-    print("Phase 1: 加载 Previous Comments...")
+    # Phase 1: 加载所有层级的 Previous Comments
+    print("Phase 1: 加载所有层级的 Previous Comments...")
     
-    previous_comments_count = 0
-    max_attempts = 20  # 防止无限循环
-    
-    for attempt in range(max_attempts):
-        try:
-            # 使用精确的选择器查找 Previous Comments 按钮
-            previous_button = page.locator(SELECTORS['PREVIOUS_COMMENTS_BUTTON'])
-            
-            # 检查按钮是否存在且可见
-            if await previous_button.count() > 0 and await previous_button.is_visible():
-                print(f"  找到 Previous Comments 按钮，准备点击...")
-                
-                # 确保按钮可以点击
-                await previous_button.wait_for(state='visible', timeout=5000)
-                await previous_button.scroll_into_view_if_needed()
-                await page.wait_for_timeout(1000)  # 等待页面稳定
-                
-                # 点击按钮
-                await previous_button.click()
-                previous_comments_count += 1
-                print(f"    已点击 Previous Comments {previous_comments_count} 次")
-                
-                # 等待新内容加载
-                await page.wait_for_load_state('networkidle', timeout=10000)
-                await page.wait_for_timeout(config.WAIT_TIME)
-                
-            else:
-                print(f"  没有更多 Previous Comments 按钮，共加载了 {previous_comments_count} 页")
-                break
-                
-        except Exception as e:
-            print(f"  Previous Comments 加载出错 (尝试 {attempt + 1}): {e}")
-            if previous_comments_count > 0:
-                print(f"  已成功加载 {previous_comments_count} 页，继续下一阶段")
-            break
-    
-    print(f"  Phase 1 完成: 加载了 {previous_comments_count} 页 Previous Comments")
+    total_previous_loaded = await load_all_previous_comments(page, config)
+    print(f"  Phase 1 完成: 总共加载了 {total_previous_loaded} 个 Previous Comments")
     
     # Phase 2: 展开所有折叠的评论内容（More 链接）
     print("Phase 2: 展开所有折叠的评论内容...")
@@ -228,6 +352,41 @@ async def load_all_comments(page, config):
             break
     
     print(f"评论加载完成！共展开了 {expand_count} 项折叠内容")
+    
+    # Phase 3: 展开More链接后，重新检查是否有新的Previous Comments出现
+    print("Phase 3: 检查展开后是否有新的 Previous Comments...")
+    additional_previous = await load_all_previous_comments(page, config)
+    if additional_previous > 0:
+        print(f"  发现并加载了额外的 {additional_previous} 个 Previous Comments")
+        
+        # 如果加载了新的Previous Comments，可能需要重新展开More链接
+        print("  重新检查是否有新的More链接需要展开...")
+        additional_expand = await expand_remaining_more_links(page, config, max_iterations=3)
+        print(f"  额外展开了 {additional_expand} 项内容")
+    else:
+        print("  没有发现新的 Previous Comments")
+
+
+async def final_comment_verification(page, extracted_count):
+    """
+    最终验证评论提取的完整性
+    """
+    try:
+        expected_count = await get_expected_comment_count(page)
+        if expected_count:
+            if extracted_count < expected_count:
+                shortage = expected_count - extracted_count
+                print(f"⚠️ 评论提取可能不完整:")
+                print(f"   期望: {expected_count} 条")
+                print(f"   实际: {extracted_count} 条")  
+                print(f"   缺少: {shortage} 条")
+                print(f"💡 建议: 可能需要手动检查页面是否有未展开的评论区域")
+            elif extracted_count >= expected_count:
+                print(f"✅ 评论提取完整: {extracted_count}/{expected_count}")
+            else:
+                print(f"📊 评论提取统计: {extracted_count} 条 (期望: {expected_count})")
+    except Exception as e:
+        print(f"验证过程出错: {e}")
 
 
 async def extract_post_content(page) -> Dict[str, Any]:
@@ -394,6 +553,14 @@ async def extract_comments(page) -> List[Dict[str, Any]]:
                 continue
         
         print(f"✅ 成功提取 {len(root_comments)} 条根评论")
+        
+        # 计算总评论数（包括所有嵌套回复）
+        total_extracted_comments = count_all_comments_recursively(root_comments)
+        print(f"📊 总评论数统计: 根评论 {len(root_comments)} 条, 总计 {total_extracted_comments} 条 (包括所有回复)")
+        
+        # 最终验证：检查是否达到期望数量
+        await final_comment_verification(page, total_extracted_comments)
+        
         return root_comments
         
     except Exception as e:
@@ -531,6 +698,18 @@ async def extract_single_reply(item) -> Dict[str, Any]:
     except Exception as e:
         print(f"    提取回复数据时出错: {e}")
         return reply_data
+
+
+def count_all_comments_recursively(comments_list):
+    """
+    递归计算所有评论的总数（包括嵌套回复）
+    """
+    total = 0
+    for comment in comments_list:
+        total += 1  # 计算当前评论
+        if comment.get('replies'):
+            total += count_all_comments_recursively(comment['replies'])  # 递归计算回复
+    return total
 
 
 def clean_comment_text(text: str) -> str:

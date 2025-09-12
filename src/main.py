@@ -12,6 +12,52 @@ from playwright.async_api import async_playwright
 from config import Config
 from login import auto_login, check_login_status
 from scraper import load_all_comments, extract_comments
+import re
+
+
+def extract_post_id(url: str) -> str:
+    """
+    从OneNewBite URL中提取帖子ID
+    例如: https://onenewbite.com/posts/43168058 -> 43168058
+    """
+    from urllib.parse import unquote
+    
+    # 尝试从URL中匹配数字ID
+    match = re.search(r'/posts/(\d+)', url)
+    if match:
+        return match.group(1)
+    
+    # 如果没找到数字ID，使用URL的最后一部分
+    parts = url.rstrip('/').split('/')
+    if parts:
+        post_part = parts[-1]
+        # URL解码，处理中文字符
+        decoded_part = unquote(post_part)
+        # 如果解码后的字符串太长，使用原始字符串
+        if len(decoded_part) <= 50:
+            return decoded_part
+        else:
+            return post_part
+    
+    # 如果都失败了，使用时间戳作为后备
+    return str(int(time.time()))
+
+
+def get_output_filename(url: str) -> str:
+    """
+    根据URL生成输出文件名
+    """
+    post_id = extract_post_id(url)
+    return f"post_{post_id}.json"
+
+
+def is_already_processed(url: str, output_dir: Path) -> bool:
+    """
+    检查URL是否已经被处理过（输出文件是否存在）
+    """
+    filename = get_output_filename(url)
+    output_file = output_dir / filename
+    return output_file.exists()
 
 
 async def check_playwright_installation():
@@ -225,17 +271,9 @@ async def process_single_url(url: str) -> dict:
                 'comments': comments
             }
             
-            # 生成文件名：时间戳_帖子ID.json
-            try:
-                # 尝试从URL中提取帖子ID
-                post_id = url.split('/')[-1].split('?')[0].split('#')[0]
-                if not post_id:
-                    post_id = "unknown"
-            except:
-                post_id = "unknown"
-                
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_file = Config.OUTPUT_DIR / f"{timestamp}_{post_id}.json"
+            # 使用新的文件名生成规则
+            filename = get_output_filename(url)
+            output_file = Config.OUTPUT_DIR / filename
             
             # 确保输出目录存在
             Config.OUTPUT_DIR.mkdir(exist_ok=True)
@@ -292,21 +330,66 @@ async def main():
         
         print(f"📋 找到 {len(urls)} 个URL待处理")
         
-        # 处理第一个URL作为测试
-        test_url = urls[0]
-        print(f"\n🚀 开始处理第一个URL...")
+        # 检查每个URL的处理状态
+        urls_to_process = []
+        skipped_count = 0
         
-        result = await process_single_url(test_url)
+        for url in urls:
+            if is_already_processed(url, Config.OUTPUT_DIR):
+                post_id = extract_post_id(url)
+                print(f"⏭️ 跳过已处理的帖子: {post_id} (文件已存在)")
+                skipped_count += 1
+            else:
+                urls_to_process.append(url)
         
-        print(f"\n🎉 处理完成！")
-        print(f"   URL: {result['url']}")
-        print(f"   评论数: {result['total_comments']}")
-        print(f"   抓取时间: {result['scraped_at']}")
+        if skipped_count > 0:
+            print(f"� 跳过了 {skipped_count} 个已处理的URL")
         
-        # 如果有多个URL，询问是否继续处理
-        if len(urls) > 1:
-            print(f"\n还有 {len(urls) - 1} 个URL待处理。")
-            print("如需批量处理，可以修改此程序的逻辑。")
+        if not urls_to_process:
+            print("✅ 所有URL都已处理完成，无需重新抓取")
+            return
+            
+        print(f"🎯 需要处理 {len(urls_to_process)} 个新URL")
+        
+        # 循环处理所有未处理的URL
+        successful_count = 0
+        failed_count = 0
+        
+        for i, url in enumerate(urls_to_process, 1):
+            try:
+                post_id = extract_post_id(url)
+                print(f"\n🚀 开始处理第 {i}/{len(urls_to_process)} 个URL...")
+                print(f"🔍 正在处理帖子: {post_id}")
+                print(f"🌐 URL: {url}")
+                
+                result = await process_single_url(url)
+                
+                print(f"\n✅ 帖子 {post_id} 处理完成！")
+                print(f"   评论数: {result['total_comments']}")
+                print(f"   保存文件: {get_output_filename(url)}")
+                
+                successful_count += 1
+                
+                # 如果还有更多URL要处理，短暂等待
+                if i < len(urls_to_process):
+                    print("⏳ 等待2秒后处理下一个URL...")
+                    await asyncio.sleep(2)
+                    
+            except Exception as e:
+                post_id = extract_post_id(url)
+                print(f"\n❌ 处理帖子 {post_id} 时发生错误: {e}")
+                failed_count += 1
+                
+                # 继续处理下一个URL
+                continue
+        
+        # 显示最终统计
+        print(f"\n🎉 批量处理完成！")
+        print(f"📊 统计信息:")
+        print(f"   ✅ 成功处理: {successful_count} 个")
+        print(f"   ❌ 处理失败: {failed_count} 个")
+        print(f"   ⏭️ 已跳过: {skipped_count} 个")
+        print(f"   📁 输出目录: {Config.OUTPUT_DIR}")
             
     except KeyboardInterrupt:
         print("\n⚠️ 用户中断程序")
