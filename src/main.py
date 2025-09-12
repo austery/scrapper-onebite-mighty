@@ -206,16 +206,21 @@ async def process_single_url(url: str) -> dict:
             await page.goto(url, wait_until='networkidle')
             await page.wait_for_timeout(2000)
             
-            # 5. 加载所有评论
+            # 5. 提取主帖内容
+            from scraper import extract_post_content
+            post_content = await extract_post_content(page)
+            
+            # 6. 加载所有评论
             await load_all_comments(page, Config)
             
-            # 6. 提取数据
+            # 7. 提取评论数据
             comments = await extract_comments(page)
             
-            # 7. 保存为JSON
+            # 8. 保存为JSON
             output_data = {
                 'url': url,
                 'scraped_at': datetime.now().isoformat(),
+                'post': post_content,
                 'total_comments': len(comments),
                 'comments': comments
             }
