@@ -14,11 +14,11 @@ SELECTORS = {
     # Previous Comments 按钮 - 根据用户提供的实际选择器
     'PREVIOUS_COMMENTS_BUTTON': '#sidebar-comments-region > div > div.comments-region > div > div.load-more-wrapper-previous > a',
     
-    # More 展开链接 - 展开被折叠的长评论（避免使用 nth-child）
-    'EXPAND_MORE_LINKS': '#sidebar-comments-region .comment-body.mighty-wysiwyg-content.fr-view.wysiwyg-comment.long.is-truncated > a',
+    # More 展开链接 - 只针对评论内容的展开，避免点击图片和其他元素
+    'EXPAND_MORE_LINKS': '#sidebar-comments-region .comment-body.mighty-wysiwyg-content.fr-view.wysiwyg-comment.long.is-truncated > a:has-text("more")',
     
-    # 更通用的 More 链接选择器作为备选
-    'EXPAND_LINKS_FALLBACK': 'a.more.text-color-grey-3-link',
+    # 更通用的 More 链接选择器作为备选 - 限制在评论区域内
+    'EXPAND_LINKS_FALLBACK': '#sidebar-comments-region a.more.text-color-grey-3-link:has-text("more")',
     
     # 评论项（在容器内查找）
     'COMMENT_ITEMS': 'li',  # 必须在COMMENT_CONTAINER内使用
@@ -222,15 +222,73 @@ async def expand_remaining_more_links(page, config, max_iterations=3):
     return expand_count
 
 
+async def scroll_and_discover_comments(page, config):
+    """
+    通过页面滚动和视角调整来发现隐藏的评论
+    """
+    print("  🔍 执行页面滚动和视角调整以发现隐藏评论...")
+    
+    try:
+        # 首先滚动到评论区域
+        await page.locator('#sidebar-comments-region').scroll_into_view_if_needed()
+        await page.wait_for_timeout(1000)
+        
+        # 1. 向下缓慢滚动，触发懒加载
+        print("    📜 执行缓慢滚动以触发懒加载...")
+        for i in range(3):
+            await page.evaluate("window.scrollBy(0, 300)")
+            await page.wait_for_timeout(1500)
+            
+        # 2. 滚动到评论区域底部
+        print("    ⬇️ 滚动到评论区域底部...")
+        await page.evaluate("""
+            const commentRegion = document.querySelector('#sidebar-comments-region');
+            if (commentRegion) {
+                commentRegion.scrollTop = commentRegion.scrollHeight;
+            }
+        """)
+        await page.wait_for_timeout(2000)
+        
+        # 3. 回到评论区域顶部
+        print("    ⬆️ 回到评论区域顶部...")
+        await page.evaluate("""
+            const commentRegion = document.querySelector('#sidebar-comments-region');
+            if (commentRegion) {
+                commentRegion.scrollTop = 0;
+            }
+        """)
+        await page.wait_for_timeout(1000)
+        
+        # 4. 尝试调整页面缩放比例
+        print("    🔍 调整页面缩放比例...")
+        # 先缩小到90%查看更多内容
+        await page.evaluate("document.body.style.zoom = '0.9'")
+        await page.wait_for_timeout(1000)
+        
+        # 然后恢复正常大小
+        await page.evaluate("document.body.style.zoom = '1.0'")
+        await page.wait_for_timeout(1000)
+        
+        print("    ✅ 页面滚动和视角调整完成")
+        
+    except Exception as e:
+        print(f"    ⚠️ 页面滚动和视角调整时出错: {e}")
+
+
 async def load_all_comments(page, config):
     """
-    双循环加载策略
+    增强的双循环加载策略
+    Phase 0: 页面滚动和视角调整
     Phase 1: 循环点击"Previous Comments"直到全部加载
     Phase 2: 循环点击所有"more"链接直到全部展开
     """
     print("开始加载所有评论...")
     
-    # 先进行调试分析
+    # Phase 0: 页面滚动和视角调整 (新增)
+    print("Phase 0: 页面滚动和视角调整...")
+    await scroll_and_discover_comments(page, config)
+    
+    # 重新进行调试分析（滚动后可能发现新内容）
     await debug_page_structure(page)
     
     # Phase 1: 加载所有层级的 Previous Comments
@@ -242,8 +300,12 @@ async def load_all_comments(page, config):
     # Phase 2: 展开所有折叠的评论内容（More 链接）
     print("Phase 2: 展开所有折叠的评论内容...")
     expand_count = 0
-    max_iterations = 10  # 防止无限循环
+    max_iterations = 8  # 限制最大迭代次数防止无限循环
     iteration = 0
+    
+    # 无限循环检测变量
+    previous_link_count = 0
+    no_change_count = 0  # 连续无变化次数
     
     while iteration < max_iterations:
         try:
@@ -263,14 +325,32 @@ async def load_all_comments(page, config):
                 print(f"  没有找到更多折叠内容，共展开了 {expand_count} 项")
                 break
                 
-            print(f"  找到 {len(more_links)} 个折叠内容")
+            current_link_count = len(more_links)
+            print(f"  找到 {current_link_count} 个折叠内容")
+            
+            # 无限循环检测：如果链接数量没有变化，可能陷入循环
+            if current_link_count == previous_link_count:
+                no_change_count += 1
+                print(f"  ⚠️ 检测到链接数量未变化（连续 {no_change_count} 次）")
+                if no_change_count >= 3:  # 连续3次无变化就停止
+                    print(f"  🛑 检测到可能的无限循环，停止More链接展开")
+                    break
+            else:
+                no_change_count = 0  # 重置计数器
+                
+            previous_link_count = current_link_count
             
             # 逐个点击展开链接
             links_clicked = 0
             for i, link in enumerate(more_links):
                 try:
-                    # 检查链接是否可见
+                    # 检查链接是否可见且文本确实是"more"
                     if await link.is_visible():
+                        link_text = await link.text_content()
+                        if not link_text or "more" not in link_text.lower():
+                            print(f"    ⚠️ 第 {i+1} 个链接文本不匹配 ('{link_text}')，跳过")
+                            continue
+                            
                         print(f"    准备点击第 {i+1} 个 More 链接...")
                         
                         # 滚动到元素
@@ -330,22 +410,12 @@ async def load_all_comments(page, config):
             # 等待页面稳定
             await page.wait_for_timeout(config.WAIT_TIME)
             
-            # 检查是否还有新的 More 链接出现
-            # 如果连续几轮点击数量相同，可能说明页面没有新内容加载
-            if iteration > 2 and links_clicked == len(more_links):
-                print(f"  检测到可能的重复点击，尝试额外等待...")
-                await page.wait_for_timeout(2000)
-                
-                # 重新检查是否有新的链接
-                new_more_links = await page.locator(SELECTORS['EXPAND_MORE_LINKS']).count()
-                fallback_links = await page.locator(SELECTORS['EXPAND_LINKS_FALLBACK']).count()
-                total_new_links = new_more_links + fallback_links
-                
-                if total_new_links <= len(more_links):
-                    print(f"  没有检测到新的 More 链接，结束展开")
-                    break
-            
             iteration += 1
+            
+            # 早期退出检查：如果迭代次数超过限制
+            if iteration >= max_iterations:
+                print(f"  🛑 达到最大迭代次数 {max_iterations}，停止展开防止无限循环")
+                break
             
         except Exception as e:
             print(f"  展开折叠内容时发生错误: {e}")
@@ -365,6 +435,20 @@ async def load_all_comments(page, config):
         print(f"  额外展开了 {additional_expand} 项内容")
     else:
         print("  没有发现新的 Previous Comments")
+    
+    # Phase 4: 最终发现阶段 - 再次滚动和搜索
+    print("Phase 4: 最终发现阶段 - 再次滚动和搜索...")
+    await scroll_and_discover_comments(page, config)
+    
+    # 最终检查是否还有未发现的Previous Comments
+    final_previous = await load_all_previous_comments(page, config)
+    if final_previous > 0:
+        print(f"  最终发现了额外的 {final_previous} 个 Previous Comments")
+        # 再次展开可能的More链接
+        final_expand = await expand_remaining_more_links(page, config, max_iterations=2)
+        print(f"  最终额外展开了 {final_expand} 项内容")
+    else:
+        print("  最终检查：没有发现更多Previous Comments")
 
 
 async def final_comment_verification(page, extracted_count):
@@ -405,11 +489,14 @@ async def extract_post_content(page) -> Dict[str, Any]:
     }
     
     try:
-        # 尝试提取帖子标题
+        # 尝试提取帖子标题 - 使用更精确的选择器避免混淆
         title_selectors = [
-            'h1',
+            '#detail-layout > div.detail-layout-content-wrapper > div.detail-layout-title',
+            '.detail-layout-title',
+            '#detail-layout h1',
             '.post-title',
-            '.article-title',
+            '.article-title', 
+            'h1',
             '[data-testid="post-title"]'
         ]
         
@@ -444,9 +531,9 @@ async def extract_post_content(page) -> Dict[str, Any]:
             try:
                 content_element = page.locator(selector).first
                 if await content_element.count() > 0:
-                    content_text = await content_element.text_content()
-                    if content_text and len(content_text.strip()) > 20:  # 确保不是空内容
-                        post_data['content'] = content_text.strip()
+                    content_html = await content_element.inner_html()
+                    if content_html and len(content_html.strip()) > 20:  # 确保不是空内容
+                        post_data['content'] = content_html.strip()
                         print(f"✅ 找到内容: {post_data['content'][:100]}...")
                         break
             except:
@@ -583,9 +670,9 @@ async def extract_single_comment_with_replies(item) -> Dict[str, Any]:
         # 提取主评论文本 - 只提取当前层级的内容，不包括回复
         comment_body = item.locator('.comment-body').first
         if await comment_body.count() > 0:
-            # 获取评论文本，但排除嵌套的回复内容
-            comment_text = await comment_body.text_content()
-            comment_data['text'] = clean_comment_text(comment_text)
+            # 获取评论HTML，保留格式信息
+            comment_html = await comment_body.inner_html()
+            comment_data['text'] = clean_comment_html(comment_html)
         
         # 提取作者信息
         author_selectors = [
@@ -657,8 +744,8 @@ async def extract_single_reply(item) -> Dict[str, Any]:
         # 提取回复文本
         reply_body = item.locator('.comment-body').first
         if await reply_body.count() > 0:
-            reply_text = await reply_body.text_content()
-            reply_data['text'] = clean_comment_text(reply_text)
+            reply_html = await reply_body.inner_html()
+            reply_data['text'] = clean_comment_html(reply_html)
         
         # 提取作者
         author_selectors = [
@@ -724,6 +811,25 @@ def clean_comment_text(text: str) -> str:
     # 移除可能的系统文本
     text = re.sub(r'(Reply|回复|删除|Delete|编辑|Edit)', '', text)
     return text.strip()
+
+
+def clean_comment_html(html: str) -> str:
+    """
+    清理评论HTML，保留格式标签但移除无用的系统元素
+    """
+    if not html:
+        return ""
+    
+    # 移除可能的系统按钮和链接
+    html = re.sub(r'<a[^>]*href[^>]*>[\s\S]*?(Reply|回复|删除|Delete|编辑|Edit|more|更多)[\s\S]*?</a>', '', html, flags=re.IGNORECASE)
+    
+    # 移除空的段落和div标签
+    html = re.sub(r'<(p|div)[^>]*>\s*</\1>', '', html, flags=re.IGNORECASE)
+    
+    # 清理多余的空白但保留HTML结构
+    html = re.sub(r'\s+', ' ', html.strip())
+    
+    return html.strip()
 
 
 async def extract_single_comment(item) -> Dict[str, Any]:

@@ -315,7 +315,13 @@ async def main():
         print("✅ 配置验证通过")
         
         # 读取测试URL
-        test_urls_file = Path('test_urls.txt')
+        # 优先使用test_enhanced.txt进行测试，然后test_fix.txt，最后test_urls.txt
+        test_urls_file = Path('test_enhanced.txt')
+        if not test_urls_file.exists():
+            test_urls_file = Path('test_fix.txt')
+        if not test_urls_file.exists():
+            test_urls_file = Path('test_urls.txt')
+            
         if not test_urls_file.exists():
             print("❌ test_urls.txt 文件不存在")
             print("请创建 test_urls.txt 文件并添加要抓取的URL")
