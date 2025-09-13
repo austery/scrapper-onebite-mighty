@@ -489,26 +489,188 @@ async def extract_post_content(page) -> Dict[str, Any]:
     }
     
     try:
-        # 尝试提取帖子标题 - 使用更精确的选择器避免混淆
-        title_selectors = [
-            '#detail-layout > div.detail-layout-content-wrapper > div.detail-layout-title',
-            '.detail-layout-title',
-            '#detail-layout h1',
-            '.post-title',
-            '.article-title', 
-            'h1',
-            '[data-testid="post-title"]'
-        ]
+        # 实现层次化标题提取逻辑 - 严格限制在主体容器内
+        print("🔍 开始层次化标题提取...")
         
-        for selector in title_selectors:
+        # 首先定位到文章的主体容器
+        post_container = page.locator('#detail-layout > div.detail-layout-content-wrapper')
+        container_exists = await post_container.count() > 0
+        
+        if container_exists:
+            print("✅ 找到文章主体容器")
+            
+            # 策略一：使用精确的标题选择器
             try:
-                title_element = page.locator(selector).first
+                # 使用你提供的精确标题选择器
+                title_selector = '#detail-layout > div.detail-layout-content-wrapper > div.detail-layout-title.mighty-wysiwyg-content.fr-view.mighty-max-content-width'
+                title_element = page.locator(title_selector).first
+                
                 if await title_element.count() > 0:
-                    post_data['title'] = await title_element.text_content()
-                    print(f"✅ 找到标题: {post_data['title'][:50]}...")
-                    break
+                    title_text = await title_element.text_content()
+                    if title_text and title_text.strip():
+                        # 如果标题过长，适当截短
+                        clean_title = title_text.strip()
+                        if len(clean_title) > 80:
+                            clean_title = clean_title[:70] + "..."
+                        post_data['title'] = clean_title
+                        print(f"✅ 策略一成功 - 精确选择器: {post_data['title'][:50]}...")
+                    else:
+                        raise Exception("标题为空")
+                else:
+                    raise Exception("未找到标题元素")
+                
+                # 备选选择器列表（如果精确选择器失败）
+                title_selectors = [
+                    '.detail-layout-title',
+                    'h1',
+                    'h2',
+                    '.post-title'
+                ]
+                
+                for selector in title_selectors:
+                    title_elements = page.locator(selector)
+                    element_count = await title_elements.count()
+                    if element_count > 0:
+                        for i in range(element_count):
+                            element = title_elements.nth(i)
+                            title_text = await element.text_content()
+                            if title_text and len(title_text.strip()) > 3 and len(title_text.strip()) < 200:
+                                # 过滤掉明显不是标题的内容
+                                if not any(skip in title_text.lower() for skip in ['sign in', 'login', 'menu', 'search', 'navigation']):
+                                    post_data['title'] = title_text.strip()
+                                    print(f"✅ 备选策略成功 - 选择器 {selector}: {post_data['title'][:50]}...")
+                                    break
+                    if post_data['title']:
+                        break
+                
+                if not post_data['title']:
+                    raise Exception("No title found")
             except:
-                continue
+                print("⚠️ 策略一失败，尝试策略二...")
+                
+                # 策略二：在容器内查找 h1 标签
+                try:
+                    title_element = post_container.locator('h1').first
+                    if await title_element.count() > 0:
+                        title_text = await title_element.text_content()
+                        if title_text and title_text.strip():
+                            post_data['title'] = title_text.strip()
+                            print(f"✅ 策略二成功 - H1标签: {post_data['title'][:50]}...")
+                        else:
+                            raise Exception("Title is empty")
+                    else:
+                        raise Exception("Element not found")
+                except:
+                    print("⚠️ 策略二失败，尝试策略三...")
+                    
+                    # 策略三：在容器内查找特定的标题相关元素，但要避免作者名
+                    try:
+                        # 尝试查找不是作者区域的title类元素
+                        title_candidates = await post_container.locator('[class*="title"]').all()
+                        for candidate in title_candidates:
+                            title_text = await candidate.text_content()
+                            if title_text and title_text.strip():
+                                # 过滤掉可能是作者名的短文本（通常作者名较短）
+                                if len(title_text.strip()) > 10:  # 标题通常比作者名长
+                                    post_data['title'] = title_text.strip()
+                                    print(f"✅ 策略三成功 - 过滤后的title类: {post_data['title'][:50]}...")
+                                    break
+                        
+                        if not post_data['title']:
+                            raise Exception("No suitable title found")
+                    except:
+                        print("⚠️ 策略三失败，尝试策略四...")
+                        
+                        # 策略四：简化的内容推断（最后手段）
+                        try:
+                            content_element = post_container.locator('.detail-layout-description').first
+                            if await content_element.count() > 0:
+                                content_text = await content_element.text_content()
+                                if content_text:
+                                    # 只使用前50个字符作为标题
+                                    first_line = content_text.strip().split('\n')[0].strip()
+                                    if len(first_line) > 10 and len(first_line) < 80:
+                                        post_data['title'] = first_line
+                                        print(f"✅ 策略四成功 - 内容推断: {post_data['title'][:50]}...")
+                                    elif len(first_line) >= 80:
+                                        post_data['title'] = first_line[:70] + '...'
+                                        print(f"✅ 策略四成功 - 内容截取: {post_data['title'][:50]}...")
+                                    else:
+                                        raise Exception("Content too short")
+                                else:
+                                    raise Exception("No content")
+                            
+                            if not post_data['title']:
+                                print("⚠️ 容器内策略全部失败，使用页面级备选方案...")
+                                container_exists = False
+                        except Exception:
+                            print("⚠️ 内容推断失败，使用页面级备选方案...")
+                            container_exists = False
+        
+        # 最终备选：页面级通用选择器和内容分析（仅在容器策略全部失败时使用）
+        if not post_data['title'] or not container_exists:
+            print("🔄 执行页面级备选标题提取...")
+            
+            # 首先尝试页面标题
+            try:
+                page_title = await page.title()
+                print(f"    页面title标签: {page_title}")
+                if page_title and len(page_title.strip()) > 10:
+                    cleaned_title = page_title.replace(' - OneNewBite', '').replace('| OneNewBite', '').strip()
+                    if len(cleaned_title) > 5 and cleaned_title.lower() != 'untitled':
+                        post_data['title'] = cleaned_title
+                        print(f"✅ 备选策略成功 - 页面title: {post_data['title'][:50]}...")
+                    else:
+                        raise Exception("Page title not suitable")
+                else:
+                    raise Exception("No page title")
+            except:
+                # 如果页面标题不行，尝试从内容第一行推断
+                try:
+                    print("    从页面级内容推断标题...")
+                    content_selectors = [
+                        '.detail-layout-description',
+                        '.mighty-wysiwyg-content',
+                        '.post-content',
+                        '.main-content'
+                    ]
+                    
+                    for selector in content_selectors:
+                        try:
+                            content_element = page.locator(selector).first
+                            if await content_element.count() > 0:
+                                content_text = await content_element.text_content()
+                                if content_text:
+                                    # 从内容第一句话推断标题
+                                    first_line = content_text.strip().split('\n')[0].strip()
+                                    if len(first_line) > 10 and len(first_line) < 200:
+                                        post_data['title'] = first_line
+                                        print(f"✅ 备选策略成功 - 内容推断: {post_data['title'][:50]}...")
+                                        break
+                        except:
+                            continue
+                    
+                    # 如果还是没有，才使用DOM选择器作为最后手段
+                    if not post_data['title']:
+                        fallback_selectors = [
+                            '.detail-layout-title',
+                            '.post-title',
+                            '.article-title'
+                        ]
+                        
+                        for selector in fallback_selectors:
+                            try:
+                                title_element = page.locator(selector).first
+                                if await title_element.count() > 0:
+                                    title_text = await title_element.text_content()
+                                    if title_text and title_text.strip():
+                                        post_data['title'] = title_text.strip()
+                                        print(f"✅ 最终备选成功 ({selector}): {post_data['title'][:50]}...")
+                                        break
+                            except:
+                                continue
+                except:
+                    pass
         
         # 尝试提取帖子内容 - 使用用户提供的准确选择器
         content_selectors = [
@@ -541,6 +703,7 @@ async def extract_post_content(page) -> Dict[str, Any]:
         
         # 尝试提取作者信息
         author_selectors = [
+            '#detail-layout-attribution-region > div > div.container-center > div > div.mighty-attribution-name-container > a',
             '.post-author',
             '.author-name',
             '.user-name',
